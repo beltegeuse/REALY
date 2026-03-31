@@ -24,7 +24,13 @@ SOFTWARE.
 
 import numpy as np
 import os
+import sys
 from glob import glob
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
 from utils.io_obj import read, write
 import trimesh
 from utils.util import keypoints_region_map
@@ -269,13 +275,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--REALY_HIFI3D_keypoints",
         help="PATH to the ground-truth HIFI3D mesh",
-        default="./data/REALY_HIFI3D_keypoints",
+        default=os.path.join(_SCRIPT_DIR, "data", "REALY_HIFI3D_keypoints"),
         type=str,
     )
     parser.add_argument(
         "--REALY_scan_region",
         help="PATH to the ground-truth scan region",
-        default="./data/REALY_scan_region",
+        default=os.path.join(_SCRIPT_DIR, "data", "REALY_scan_region"),
         type=str,
     )
 
@@ -294,7 +300,7 @@ if __name__ == "__main__":
     parser.add_argument("--template_topology", help="template topology", default="HIFI3D++", type=str)
 
     parser.add_argument(
-        "--scale_path", help="PATH to the metrical scale file", default="./data/metrical_scale.txt", type=str
+        "--scale_path", help="PATH to the metrical scale file", default=os.path.join(_SCRIPT_DIR, "data", "metrical_scale.txt"), type=str
     )
     parser.add_argument(
         "--save",

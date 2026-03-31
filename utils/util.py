@@ -62,8 +62,9 @@ def get_barycentric_coordinates(vertices, template_topology="HIFI3D"):
     Returns: 85 keypoints of the mesh, shape: 85x3
 
     """
-    bary_root = r"./data/"
-    obj_root = r"./data/"
+    _data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
+    bary_root = _data_dir
+    obj_root = _data_dir
     bary_path = os.path.join(bary_root, "%s.txt" % template_topology)
     obj_path = os.path.join(obj_root, "%s.obj" % template_topology)
 
