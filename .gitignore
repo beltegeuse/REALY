@@ -127,3 +127,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Data
+data/REALY_HIFI3D_keypoints/
+data/REALY_scan_region/
