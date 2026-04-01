@@ -348,7 +348,7 @@ if __name__ == "__main__":
         "--save",
         help="PATH to save the aligned meshes, deformation meshes, error map, and NMSE results",
         type=str,
-        required=True,
+        required=False,
     )
     parser.add_argument(
         "--num_workers",
@@ -358,6 +358,11 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    if args.save is None:
+        # Add _out suffix to prediction path if save not specified
+        args.save = args.prediction.rstrip("/\\") + "_out"
+        print(f"No --save specified, using {args.save} as output directory.")
 
     REALY_eval_all(args)
     get_statistic_metric(args)
