@@ -41,6 +41,8 @@ from utils.rICP import region_icp_all as rICP_all
 from utils.gICP import global_rigid_align_7_kpt as gicp
 from utils.eval import bidirectional_evaluation_pipeline as bi_eval
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -105,6 +107,150 @@ def get_statistic_metric(args):
     return
 
 
+def _process_subject(
+    subject_path,
+    REALY_keypoints_root,
+    REALY_scan_region_root,
+    prediction_mesh_root,
+    template_topology,
+    pred_mask_face,
+    metrical_scale,
+    aligned_predicted_mesh_save_root,
+):
+    """Process a single subject mesh. Runs in a worker process."""
+    _, subject = os.path.split(subject_path)
+    subject = subject.replace(".obj", "")
+    subject_id = int(subject.split("_")[0])
+
+    # read 3D meshes for evaluation
+    REALY_keypoints_path = os.path.join(REALY_keypoints_root, str(subject_id) + ".obj")
+    predicted_mesh_path = os.path.join(prediction_mesh_root, subject + ".obj")
+    predicted_mesh = read(predicted_mesh_path)
+    REALY_HIFI3D_keypoints = read(REALY_keypoints_path)["v"]
+
+    REALY_scan_region_path = os.path.join(REALY_scan_region_root, str(subject_id))
+    REALY_scan_nose_mesh = read(os.path.join(REALY_scan_region_path, "nose.obj"))
+    REALY_scan_mouth_mesh = read(os.path.join(REALY_scan_region_path, "mouth.obj"))
+    REALY_scan_forehead_mesh = read(os.path.join(REALY_scan_region_path, "forehead.obj"))
+    REALY_scan_cheek_mesh = read(os.path.join(REALY_scan_region_path, "cheek.obj"))
+
+    REALY_scan_nose_vertices = REALY_scan_nose_mesh["v"]
+    REALY_scan_mouth_vertices = REALY_scan_mouth_mesh["v"]
+    REALY_scan_forehead_vertices = REALY_scan_forehead_mesh["v"]
+    REALY_scan_cheek_vertices = REALY_scan_cheek_mesh["v"]
+
+    REALY_scan_nose_triangles = REALY_scan_nose_mesh["fv"]
+    REALY_scan_mouth_triangles = REALY_scan_mouth_mesh["fv"]
+    REALY_scan_forehead_triangles = REALY_scan_forehead_mesh["fv"]
+    REALY_scan_cheek_triangles = REALY_scan_cheek_mesh["fv"]
+
+    # Step1: gICP, global-align the prediction mesh to the ground-truth scan
+    predicted_vertices_global_aligned = gicp(
+        predicted_mesh["v"], REALY_HIFI3D_keypoints, template_topology=template_topology
+    )
+
+    # Step2: rICP, regional align the prediction mesh to the ground-truth scan region
+    REALY_scan_region_vertices_dict = {
+        "nose": REALY_scan_nose_vertices,
+        "mouth": REALY_scan_mouth_vertices,
+        "forehead": REALY_scan_forehead_vertices,
+        "cheek": REALY_scan_cheek_vertices,
+    }
+
+    REALY_scan_region_triangles_dict = {
+        "nose": REALY_scan_nose_triangles,
+        "mouth": REALY_scan_mouth_triangles,
+        "forehead": REALY_scan_forehead_triangles,
+        "cheek": REALY_scan_cheek_triangles,
+    }
+
+    region_list = ["nose", "mouth", "forehead", "cheek"]
+
+    regional_aligned_vertices_dict, regional_aligned_triangles_dict = rICP_all(
+        predicted_mesh=predicted_mesh,
+        REALY_scan_region_dict=REALY_scan_region_vertices_dict,
+        REALY_HIFI3D_keypoints=REALY_HIFI3D_keypoints,
+        template_topology=template_topology,
+        max_iteration=100,
+        pred_mask_face=pred_mask_face,
+    )
+
+    align_save_path = os.path.join(aligned_predicted_mesh_save_root, subject)
+    os.makedirs(align_save_path, exist_ok=True)
+
+    write(
+        os.path.join(align_save_path, "at_global.obj"),
+        predicted_vertices_global_aligned,
+        regional_aligned_triangles_dict["forehead"],
+    )
+
+    write(
+        os.path.join(align_save_path, "at_nose.obj"),
+        regional_aligned_vertices_dict["nose"],
+        regional_aligned_triangles_dict["nose"],
+    )
+    write(
+        os.path.join(align_save_path, "at_mouth.obj"),
+        regional_aligned_vertices_dict["mouth"],
+        regional_aligned_triangles_dict["mouth"],
+    )
+    write(
+        os.path.join(align_save_path, "at_forehead.obj"),
+        regional_aligned_vertices_dict["forehead"],
+        regional_aligned_triangles_dict["forehead"],
+    )
+    write(
+        os.path.join(align_save_path, "at_cheek.obj"),
+        regional_aligned_vertices_dict["cheek"],
+        regional_aligned_triangles_dict["cheek"],
+    )
+
+    keypoints_map = {
+        "forehead": keypoints_region_map["forehead"],
+        "cheek": None,
+        "nose": keypoints_region_map["nose"],
+        "mouth": keypoints_region_map["mouth"],
+    }
+
+    line_parts = [subject, "\t"]
+
+    # bICP and calculate errors for each region
+    for region in region_list:
+        predicted_keypoints = get_barycentric_coordinates(
+            regional_aligned_vertices_dict[region], template_topology
+        )
+        predicted_keypoints_region = predicted_keypoints[keypoints_map[region]]
+        REALY_HIFI3D_keypoints_region = REALY_HIFI3D_keypoints[keypoints_map[region]]
+
+        regional_aligned_pd = trimesh.Trimesh(
+            vertices=regional_aligned_vertices_dict[region],
+            faces=regional_aligned_triangles_dict[region] - 1,
+            process=False,
+        )
+        ground_truth_region = trimesh.Trimesh(
+            vertices=REALY_scan_region_vertices_dict[region],
+            faces=REALY_scan_region_triangles_dict[region] - 1,
+            process=True,
+        )
+
+        error, deformation, error_map = bi_eval(
+            regional_aligned_pd,
+            ground_truth_region,
+            predicted_keypoints_region,
+            REALY_HIFI3D_keypoints_region,
+            region,
+            visualize_error_map=True,
+        )
+
+        line_parts.append("\t")
+        line_parts.append(str(error * metrical_scale[subject_id - 1])[:9])  # id start from 1
+        deformation.export(os.path.join(align_save_path, "deform_%s.obj" % region))
+        error_map.export(os.path.join(align_save_path, "error_%s.obj" % region))
+
+    line_parts.append("\n")
+    return "".join(line_parts)
+
+
 def REALY_eval_all(args):
     REALY_keypoints_root = args.REALY_HIFI3D_keypoints
     REALY_scan_region_root = args.REALY_scan_region
@@ -128,146 +274,42 @@ def REALY_eval_all(args):
     predicted_mesh_subjects = glob(os.path.join(prediction_mesh_root, "*.obj"))
     predicted_mesh_subjects.sort(key=lambda x: int(os.path.split(x)[1].replace("_", "").replace(".obj", "")))
 
+    # Resolve worker count: negative means cpu_count + num_workers
+    if args.num_workers < 0:
+        num_workers = os.cpu_count() + args.num_workers
+    else:
+        num_workers = args.num_workers
+    num_workers = max(1, num_workers)
+
     with tqdm(total=len(predicted_mesh_subjects)) as pbar:
         with open(REALY_error_save_path, "w") as f_w:
-            for subject_path in predicted_mesh_subjects:
-                pbar.update(1)
-                _, subject = os.path.split(subject_path)
-                subject = subject.replace(".obj", "")
-                subject_id = int(subject.split("_")[0])
-
-                # read 3D meshes for evaluation
-                REALY_keypoints_path = os.path.join(REALY_keypoints_root, str(subject_id) + ".obj")
-                predicted_mesh_path = os.path.join(prediction_mesh_root, subject + ".obj")
-                predicted_mesh = read(predicted_mesh_path)
-                REALY_HIFI3D_keypoints = read(REALY_keypoints_path)["v"]
-
-                REALY_scan_region_path = os.path.join(REALY_scan_region_root, str(subject_id))
-                REALY_scan_nose_mesh = read(os.path.join(REALY_scan_region_path, "nose.obj"))
-                REALY_scan_mouth_mesh = read(os.path.join(REALY_scan_region_path, "mouth.obj"))
-                REALY_scan_forehead_mesh = read(os.path.join(REALY_scan_region_path, "forehead.obj"))
-                REALY_scan_cheek_mesh = read(os.path.join(REALY_scan_region_path, "cheek.obj"))
-
-                REALY_scan_nose_vertices = REALY_scan_nose_mesh["v"]
-                REALY_scan_mouth_vertices = REALY_scan_mouth_mesh["v"]
-                REALY_scan_forehead_vertices = REALY_scan_forehead_mesh["v"]
-                REALY_scan_cheek_vertices = REALY_scan_cheek_mesh["v"]
-
-                REALY_scan_nose_triangles = REALY_scan_nose_mesh["fv"]
-                REALY_scan_mouth_triangles = REALY_scan_mouth_mesh["fv"]
-                REALY_scan_forehead_triangles = REALY_scan_forehead_mesh["fv"]
-                REALY_scan_cheek_triangles = REALY_scan_cheek_mesh["fv"]
-
-                # Step1: gICP, global-align the prediction mesh to the ground-truth scan
-                # We use 7 keypoint for global alignment for efficient
-                # Here is used to save the globally rigid aligned mesh
-                predicted_vertices_global_aligned = gicp(
-                    predicted_mesh["v"], REALY_HIFI3D_keypoints, template_topology=template_topology
-                )
-
-                # Step2: rICP, regional align the prediction mesh to the ground-truth scan region
-                REALY_scan_region_vertices_dict = {
-                    "nose": REALY_scan_nose_vertices,
-                    "mouth": REALY_scan_mouth_vertices,
-                    "forehead": REALY_scan_forehead_vertices,
-                    "cheek": REALY_scan_cheek_vertices,
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                futures = {
+                    executor.submit(
+                        _process_subject, sp,
+                        REALY_keypoints_root, REALY_scan_region_root,
+                        prediction_mesh_root, template_topology,
+                        pred_mask_face, metrical_scale,
+                        aligned_predicted_mesh_save_root,
+                    ): sp
+                    for sp in predicted_mesh_subjects
                 }
+                failed = []
+                for future in as_completed(futures):
+                    try:
+                        output_line = future.result()
+                        f_w.write(output_line)
+                        f_w.flush()
+                    except Exception as e:
+                        subject_path = futures[future]
+                        failed.append((subject_path, e))
+                        tqdm.write(f"ERROR processing {subject_path}: {e}")
+                    pbar.update(1)
 
-                REALY_scan_region_triangles_dict = {
-                    "nose": REALY_scan_nose_triangles,
-                    "mouth": REALY_scan_mouth_triangles,
-                    "forehead": REALY_scan_forehead_triangles,
-                    "cheek": REALY_scan_cheek_triangles,
-                }
-
-                region_list = ["nose", "mouth", "forehead", "cheek"]
-
-                # for each region, regional aligned
-                regional_aligned_vertices_dict, regional_aligned_triangles_dict = rICP_all(
-                    predicted_mesh=predicted_mesh,
-                    REALY_scan_region_dict=REALY_scan_region_vertices_dict,
-                    REALY_HIFI3D_keypoints=REALY_HIFI3D_keypoints,
-                    template_topology=template_topology,
-                    max_iteration=100,
-                    pred_mask_face=pred_mask_face,
-                )
-
-                align_save_path = os.path.join(aligned_predicted_mesh_save_root, subject)
-
-                os.makedirs(align_save_path, exist_ok=True)
-
-                write(
-                    os.path.join(align_save_path, "at_global.obj"),
-                    predicted_vertices_global_aligned,
-                    regional_aligned_triangles_dict["forehead"],
-                )
-
-                write(
-                    os.path.join(align_save_path, "at_nose.obj"),
-                    regional_aligned_vertices_dict["nose"],
-                    regional_aligned_triangles_dict["nose"],
-                )
-                write(
-                    os.path.join(align_save_path, "at_mouth.obj"),
-                    regional_aligned_vertices_dict["mouth"],
-                    regional_aligned_triangles_dict["mouth"],
-                )
-                write(
-                    os.path.join(align_save_path, "at_forehead.obj"),
-                    regional_aligned_vertices_dict["forehead"],
-                    regional_aligned_triangles_dict["forehead"],
-                )
-                write(
-                    os.path.join(align_save_path, "at_cheek.obj"),
-                    regional_aligned_vertices_dict["cheek"],
-                    regional_aligned_triangles_dict["cheek"],
-                )
-
-                keypoints_map = {
-                    "forehead": keypoints_region_map["forehead"],
-                    "cheek": None,
-                    "nose": keypoints_region_map["nose"],
-                    "mouth": keypoints_region_map["mouth"],
-                }
-
-                f_w.write(subject)
-                f_w.write("\t")
-
-                # bICP and calculate errors for each region
-                for region in region_list:
-                    predicted_keypoints = get_barycentric_coordinates(
-                        regional_aligned_vertices_dict[region], template_topology
-                    )
-                    predicted_keypoints_region = predicted_keypoints[keypoints_map[region]]
-                    REALY_HIFI3D_keypoints_region = REALY_HIFI3D_keypoints[keypoints_map[region]]
-
-                    regional_aligned_pd = trimesh.Trimesh(
-                        vertices=regional_aligned_vertices_dict[region],
-                        faces=regional_aligned_triangles_dict[region] - 1,
-                        process=False,
-                    )
-                    ground_truth_region = trimesh.Trimesh(
-                        vertices=REALY_scan_region_vertices_dict[region],
-                        faces=REALY_scan_region_triangles_dict[region] - 1,
-                        process=True,
-                    )
-
-                    error, deformation, error_map = bi_eval(
-                        regional_aligned_pd,
-                        ground_truth_region,
-                        predicted_keypoints_region,
-                        REALY_HIFI3D_keypoints_region,
-                        region,
-                        visualize_error_map=True,
-                    )
-
-                    f_w.write("\t")
-                    f_w.write(str(error * metrical_scale[subject_id - 1])[:9])  # id start from 1
-                    deformation.export(os.path.join(align_save_path, "deform_%s.obj" % region))
-                    error_map.export(os.path.join(align_save_path, "error_%s.obj" % region))
-
-                f_w.write("\n")
-                f_w.flush()
+            if failed:
+                print(f"\n{len(failed)} subject(s) failed:")
+                for path, exc in failed:
+                    print(f"  {path}: {exc}")
 
 
 if __name__ == "__main__":
@@ -307,6 +349,12 @@ if __name__ == "__main__":
         help="PATH to save the aligned meshes, deformation meshes, error map, and NMSE results",
         type=str,
         required=True,
+    )
+    parser.add_argument(
+        "--num_workers",
+        help="Number of parallel workers. Negative values mean cpu_count + num_workers (e.g., -2 on 8 cores = 6 workers). Default: -2.",
+        type=int,
+        default=-2,
     )
 
     args = parser.parse_args()
