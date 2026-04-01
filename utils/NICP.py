@@ -26,16 +26,10 @@ import numpy as np
 import scipy.sparse
 import scipy.sparse.linalg
 import scipy.spatial
+from sksparse.cholmod import cho_factor
 def spsolve(sparse_A, dense_b):
-    AtA = (sparse_A.T @ sparse_A).tocsc()
-    AtA += 1e-8 * scipy.sparse.eye(AtA.shape[0], format='csc')
-    rhs = sparse_A.T.dot(dense_b)
-    if scipy.sparse.issparse(rhs):
-        rhs = rhs.toarray()
-    result = np.zeros(rhs.shape)
-    for i in range(rhs.shape[1]):
-        result[:, i] = scipy.sparse.linalg.spsolve(AtA, rhs[:, i])
-    return result
+    factor = cho_factor(sparse_A.T, sym_kind="row")
+    return factor.solve(sparse_A.T.dot(dense_b)).toarray()
 
 
 def triangles_to_edge_vertex_adjacent_matrix(triangles):  # starting from 1
