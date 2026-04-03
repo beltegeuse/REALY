@@ -359,6 +359,24 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Check if predicition path exists
+    if not os.path.exists(args.prediction):
+        print(f"ERROR: Prediction path {args.prediction} does not exist.")
+        sys.exit(1)
+    
+    # Check if prediction path contains .obj files
+    obj_files = glob(os.path.join(args.prediction, "*.obj"))
+    if len(obj_files) == 0:
+        # Try to add "realy/" if not found
+        alt_prediction_path = os.path.join(args.prediction, "realy")
+        obj_files = glob(os.path.join(alt_prediction_path, "*.obj"))
+        if len(obj_files) == 0:
+            print(f"ERROR: No .obj files found in prediction path {args.prediction} or {alt_prediction_path}.")
+            sys.exit(1)
+        else:
+            print(f"WARNING: No .obj files found in {args.prediction}, but found in {alt_prediction_path}. Using {alt_prediction_path} as prediction path.")
+            args.prediction = alt_prediction_path
+
     if args.save is None:
         # Add _out suffix to prediction path if save not specified
         args.save = args.prediction.rstrip("/\\") + "_out"
